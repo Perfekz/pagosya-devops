@@ -1,0 +1,56 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Calcular tag e imagen
+        run: |
+          echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pagosya-api" >> "$GITHUB_ENV"
+
+      - name: Login en ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: |
+          docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE:$TAG" app/
+
+      - name: Smoke test
+        run: |
+          docker run -d --name smoke -p 8080:8000 "$IMAGE:$TAG"
+          for i in $(seq 1 30); do
+            if out=$(curl -fsS localhost:8080/ 2>/dev/null) && echo "$out" | grep -q "PagosYA api $TAG"; then
+              echo "OK: $out"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "smoke falló con $TAG" >&2
+          docker logs smoke || true
+          exit 1
+
+      - name: Limpiar contenedor de prueba
+        if: always()
+        run: docker rm -f smoke || true
+
+      - name: Publicar imagen
+        run: docker push "$IMAGE:$TAG"
